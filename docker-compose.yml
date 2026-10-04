@@ -1,0 +1,121 @@
+version: '3.8'
+
+services:
+  postgres:
+    container_name: greenhouse_postgres
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-greenhouse}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-greenhouse123}
+      POSTGRES_DB: ${POSTGRES_DB:-greenhouse_db}
+    ports:
+      - "5604:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/database/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-greenhouse} -d ${POSTGRES_DB:-greenhouse_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - greenhouse_network
+
+  redis:
+    container_name: greenhouse_redis
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6504:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - greenhouse_network
+
+  backend:
+    container_name: greenhouse_backend
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-greenhouse}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-greenhouse123}
+      - POSTGRES_DB=${POSTGRES_DB:-greenhouse_db}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-your-secret-key-here-please-change-in-production}
+      - JWT_ALGORITHM=${JWT_ALGORITHM:-HS256}
+      - JWT_ACCESS_TOKEN_EXPIRE_MINUTES=${JWT_ACCESS_TOKEN_EXPIRE_MINUTES:-1440}
+      - JWT_REFRESH_TOKEN_EXPIRE_DAYS=${JWT_REFRESH_TOKEN_EXPIRE_DAYS:-7}
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - DEBUG=${DEBUG:-True}
+    ports:
+      - "3104:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes:
+      - ./backend:/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    networks:
+      - greenhouse_network
+
+  celery_worker:
+    container_name: greenhouse_celery_worker
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-greenhouse}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-greenhouse123}
+      - POSTGRES_DB=${POSTGRES_DB:-greenhouse_db}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-your-secret-key-here-please-change-in-production}
+      - JWT_ALGORITHM=${JWT_ALGORITHM:-HS256}
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes:
+      - ./backend:/app
+    command: celery -A app.celery_app:celery_app worker --loglevel=info --beat
+    networks:
+      - greenhouse_network
+
+  frontend:
+    container_name: greenhouse_frontend
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8104:80"
+    depends_on:
+      - backend
+    networks:
+      - greenhouse_network
+
+volumes:
+  postgres_data:
+    name: greenhouse_postgres_data
+  redis_data:
+    name: greenhouse_redis_data
+
+networks:
+  greenhouse_network:
+    name: greenhouse_network
+    driver: bridge
